@@ -164,3 +164,13 @@
 - タグ名は別マスタが必要。無い場合はカテゴリ名やプロパティから自動生成する。
 - 画像パスは共通ベース URL を設定し、`image_head`/`image_mobile` をファイル名として結合する。
 
+## 実行手順（Products/Variants シート生成）
+1. ルートディレクトリで Python を実行します。
+   ```bash
+   python scripts/generate_matrixify_products.py
+   ```
+2. `output/` 配下に Matrixify 用の CSV が生成されます。
+   - `output/yumejin_products_matrixify_products.csv`（Products シート）
+   - `output/yumejin_products_matrixify_variants.csv`（Product Variants シート）
+3. 生成したファイルを Matrixify の対応シートとしてアップロードしてください。
+
