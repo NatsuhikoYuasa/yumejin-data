@@ -66,6 +66,7 @@ def read_csv_dicts(path: Path) -> List[Dict[str, str]]:
 
 def parse_decimal(value: str) -> Optional[Decimal]:
     value = value.strip()
+    value = value.replace(",", "")
     if not value:
         return None
     try:
@@ -224,7 +225,7 @@ def export_products_sheet(products: List[Product], category_paths: Dict[str, str
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for product in products:
-            handle = f"yumejin-{product.product_id}"
+            handle = product.product_id
             writer.writerow(
                 {
                     "Handle": handle,
@@ -255,7 +256,7 @@ def export_variants_sheet(products: List[Product], stocks: Dict[str, int], outpu
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for product in products:
-            handle = f"yumejin-{product.product_id}"
+            handle = product.product_id
             price, compare_at = select_prices(product)
             writer.writerow(
                 {

@@ -91,7 +91,7 @@
 
 | 元 CSV | 主キー | Shopify | 内容 | 備考 |
 | --- | --- | --- | --- | --- |
-| Product | `product_id` | Product: Handle | 英字ハンドルに変換。`product_id` をベースに正規化。 | ハンドルは一意制約。 |
+| Product | `product_id` | Product: Handle | `product_id` をそのまま Handle として使用。 | ハンドルは一意制約。 |
 | Product | `name` | Product: Title | 商品名。 | 日本語タイトル可。 |
 | Product | `catchcopy`/`outline`/`desc_detail*` | Product: Body (HTML) | 説明文を結合し HTML 化。 | モバイル別文面は注釈として統合。 |
 | Product | `display_price` / `display_special_price` | Variant: Price / Compare at Price | セール価格があれば `price` と `compare_at_price` を使い分け。 | バリアントが無い場合は単一バリアント。 |
@@ -130,7 +130,7 @@
 ### Products シート
 - 必須カラム例: `Handle`, `Title`, `Body (HTML)`, `Vendor`, `Product Category`, `Tags`, `Published`, `Image Src`。
 - 変換ルール:
-  - `Handle`: `product_id` をローマ字・ハイフンに整形。
+  - `Handle`: `product_id` をそのまま使用（Shopify 上で一意になる前提）。
   - `Title`: `name`。
   - `Body (HTML)`: `catchcopy`/`outline`/`desc_detail*` を HTML で連結。
   - `Product Category`: `category_id1-5` を `/` 区切りで階層名に変換（`ProductCategory` を JOIN）。
