@@ -13,8 +13,9 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-# 将来本番環境の URL に差し替えることを想定したベース URL
-BASE_IMAGE_URL = "https://www.example.com/images/products/"
+# W2 repeat 画像ルールに合わせたベース URL と画像サイズサフィックス
+BASE_IMAGE_URL = "https://www.yumejin.jp/Contents/ProductImages/0/"
+IMAGE_SIZE_SUFFIX = "_M"
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 INPUT_DIR = ROOT_DIR / "products"
@@ -207,7 +208,7 @@ def build_product_category(product: Product, category_paths: Dict[str, str]) -> 
 def build_image_src(product: Product) -> str:
     if not product.image_head:
         return ""
-    return f"{BASE_IMAGE_URL}{product.image_head}.jpg"
+    return f"{BASE_IMAGE_URL}{product.image_head}{IMAGE_SIZE_SUFFIX}.jpg"
 
 
 def export_products_sheet(products: List[Product], category_paths: Dict[str, str], output_path: Path) -> None:
