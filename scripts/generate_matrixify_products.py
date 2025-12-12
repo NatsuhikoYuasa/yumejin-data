@@ -8,14 +8,22 @@ from __future__ import annotations
 
 import csv
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-# W2 repeat 画像ルールに合わせたベース URL と画像サイズサフィックス
+# W2 repeat 画像ルールに合わせたベース URL
 BASE_IMAGE_URL = "https://www.yumejin.jp/Contents/ProductImages/0/"
-IMAGE_SIZE_SUFFIX = "_M"
+SUB_IMAGE_URL = "https://www.yumejin.jp/Contents/ProductSubImages/0/"
+IMAGE_EXTENSIONS = [".jpg"]
+IMAGE_SUFFIXES = ["_L", "_LL", "_M", "_S"]
+MAX_WORKERS = 16
+REQUEST_TIMEOUT = 1.5
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 INPUT_DIR = ROOT_DIR / "products"
@@ -205,14 +213,129 @@ def build_product_category(product: Product, category_paths: Dict[str, str]) -> 
     return " | ".join(dict.fromkeys(paths))
 
 
-def build_image_src(product: Product) -> str:
-    if not product.image_head:
-        return ""
-    return f"{BASE_IMAGE_URL}{product.image_head}{IMAGE_SIZE_SUFFIX}.jpg"
+def generate_image_candidates(image_head: str) -> List[str]:
+    if not image_head:
+        return []
+
+    has_suffix = any(image_head.endswith(suffix) for suffix in IMAGE_SUFFIXES)
+    heads = [image_head] if has_suffix else [f"{image_head}{suffix}" for suffix in IMAGE_SUFFIXES]
+
+    candidates: List[str] = []
+    for head in heads:
+        for ext in IMAGE_EXTENSIONS:
+            candidates.append(f"{head}{ext}")
+    return candidates
 
 
-def export_products_sheet(products: List[Product], category_paths: Dict[str, str], output_path: Path) -> None:
-    fieldnames = [
+def url_exists(url: str, cache: Dict[str, bool], lock: threading.Lock) -> bool:
+    with lock:
+        if url in cache:
+            return cache[url]
+
+    exists = False
+    range_request = Request(url, headers={"Range": "bytes=0-0"})
+    try:
+        with urlopen(range_request, timeout=REQUEST_TIMEOUT) as response:
+            exists = response.status in (200, 206, 304)
+    except HTTPError:
+        pass
+    except URLError:
+        pass
+
+    with lock:
+        cache[url] = exists
+    return exists
+
+
+def find_first_existing(candidates: List[str], cache: Dict[str, bool], lock: threading.Lock) -> Tuple[str, List[str]]:
+    tried_urls: List[str] = []
+    for url in candidates:
+        tried_urls.append(url)
+        if url_exists(url, cache, lock):
+            return url, tried_urls
+    return "", tried_urls
+
+
+def generate_main_image_urls(image_head: str) -> List[str]:
+    candidates = generate_image_candidates(image_head)
+    return [f"{BASE_IMAGE_URL}{candidate}" for candidate in candidates]
+
+
+def generate_sub_image_urls(image_head: str, index: int) -> List[str]:
+    if not image_head:
+        return []
+    sub_head = f"{image_head}_sub{index:02d}"
+    candidates = generate_image_candidates(sub_head)
+    return [f"{SUB_IMAGE_URL}{candidate}" for candidate in candidates]
+
+
+def resolve_product_images(
+    product: Product, cache: Dict[str, bool], lock: threading.Lock
+) -> Tuple[str, List[Dict[str, str]], List[Dict[str, str]]]:
+    image_rows: List[Dict[str, str]] = []
+    missing_rows: List[Dict[str, str]] = []
+
+    main_urls = generate_main_image_urls(product.image_head)
+    main_src, main_tried = find_first_existing(main_urls, cache, lock)
+    position = 1
+
+    if main_src:
+        image_rows.append(
+            {
+                "Handle": product.product_id,
+                "Image Src": main_src,
+                "Image Position": position,
+                "Image Alt Text": product.name,
+            }
+        )
+        position += 1
+    elif main_urls:
+        missing_rows.append(
+            {
+                "product_id": product.product_id,
+                "image_head": product.image_head,
+                "kind": "main",
+                "tried_urls": "|".join(main_tried),
+            }
+        )
+
+    for index in range(1, 11):
+        sub_urls = generate_sub_image_urls(product.image_head, index)
+        if not sub_urls:
+            continue
+        sub_src, sub_tried = find_first_existing(sub_urls, cache, lock)
+        kind = f"sub{index:02d}"
+        if sub_src:
+            image_rows.append(
+                {
+                    "Handle": product.product_id,
+                    "Image Src": sub_src,
+                    "Image Position": position,
+                    "Image Alt Text": product.name,
+                }
+            )
+            position += 1
+        else:
+            missing_rows.append(
+                {
+                    "product_id": product.product_id,
+                    "image_head": product.image_head,
+                    "kind": kind,
+                    "tried_urls": "|".join(sub_tried),
+                }
+            )
+
+    return main_src, image_rows, missing_rows
+
+
+def export_products_sheet(
+    products: List[Product],
+    category_paths: Dict[str, str],
+    output_path: Path,
+    missing_output_path: Path,
+    images_output_path: Path,
+) -> None:
+    product_fieldnames = [
         "Handle",
         "Title",
         "Body (HTML)",
@@ -222,23 +345,90 @@ def export_products_sheet(products: List[Product], category_paths: Dict[str, str
         "Published",
         "Image Src",
     ]
+    missing_fieldnames = ["product_id", "image_head", "kind", "tried_urls"]
+    image_fieldnames = ["Handle", "Image Src", "Image Position", "Image Alt Text"]
+    url_cache: Dict[str, bool] = {}
+    cache_lock = threading.Lock()
+
+    results: List[Optional[Tuple[Dict[str, str], List[Dict[str, str]], List[Dict[str, str]]]]] = [
+        None
+    ] * len(products)
+    total = len(products)
+    logging.info("画像解決対象件数: %d", total)
+    done = 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_index = {
+            executor.submit(resolve_product_images, product, url_cache, cache_lock): index
+            for index, product in enumerate(products)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            product = products[index]
+            try:
+                main_src, image_rows, missing_rows = future.result()
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(
+                    "画像解決中に例外が発生しました: product_id=%s %s",
+                    product.product_id,
+                    exc,
+                )
+                main_src = ""
+                image_rows = []
+                missing_rows = [
+                    {
+                        "product_id": product.product_id,
+                        "image_head": product.image_head,
+                        "kind": "main",
+                        "tried_urls": "",
+                    }
+                ]
+            product_row = {
+                "Handle": product.product_id,
+                "Title": product.name,
+                "Body (HTML)": product.body_html,
+                "Vendor": "yumejin",
+                "Product Category": build_product_category(product, category_paths),
+                "Tags": "",
+                "Published": "TRUE",
+                "Image Src": main_src,
+            }
+            results[index] = (product_row, image_rows, missing_rows)
+            done += 1
+            if done == 1 or done % 10 == 0 or done == total:
+                percentage = (done / total * 100) if total else 100
+                logging.info("画像解決 %d/%d 完了 (%.1f%%)", done, total, percentage)
+
+    product_rows: List[Dict[str, str]] = []
+    image_rows: List[Dict[str, str]] = []
+    missing_rows: List[Dict[str, str]] = []
+
+    for result in results:
+        if result is None:
+            continue
+        product_row, product_image_rows, product_missing_rows = result
+        product_rows.append(product_row)
+        image_rows.extend(product_image_rows)
+        missing_rows.extend(product_missing_rows)
+
+    logging.info("Products シート行数: %d", len(product_rows))
+    logging.info("Images シート行数: %d", len(image_rows))
+    logging.info("Missing 画像行数: %d", len(missing_rows))
+
     with output_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=product_fieldnames)
         writer.writeheader()
-        for product in products:
-            handle = product.product_id
-            writer.writerow(
-                {
-                    "Handle": handle,
-                    "Title": product.name,
-                    "Body (HTML)": product.body_html,
-                    "Vendor": "yumejin",
-                    "Product Category": build_product_category(product, category_paths),
-                    "Tags": "",
-                    "Published": "TRUE",
-                    "Image Src": build_image_src(product),
-                }
-            )
+        writer.writerows(product_rows)
+
+    with images_output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=image_fieldnames)
+        writer.writeheader()
+        writer.writerows(image_rows)
+
+    with missing_output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=missing_fieldnames)
+        writer.writeheader()
+        if missing_rows:
+            writer.writerows(missing_rows)
 
 
 def export_variants_sheet(products: List[Product], stocks: Dict[str, int], output_path: Path) -> None:
@@ -286,9 +476,13 @@ def main() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
     products_output = OUTPUT_DIR / "yumejin_products_matrixify_products.csv"
     variants_output = OUTPUT_DIR / "yumejin_products_matrixify_variants.csv"
+    images_output = OUTPUT_DIR / "yumejin_products_matrixify_images.csv"
+    missing_images_output = OUTPUT_DIR / "yumejin_products_matrixify_missing_images.csv"
 
-    logging.info("Products シートを書き出します: %s", products_output)
-    export_products_sheet(products, category_paths, products_output)
+    logging.info("Products/Images シートを書き出します: %s, %s", products_output, images_output)
+    export_products_sheet(
+        products, category_paths, products_output, missing_images_output, images_output
+    )
     logging.info("Product Variants シートを書き出します: %s", variants_output)
     export_variants_sheet(products, stocks, variants_output)
     logging.info("完了しました")
