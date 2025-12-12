@@ -353,6 +353,9 @@ def export_products_sheet(
     results: List[Optional[Tuple[Dict[str, str], List[Dict[str, str]], List[Dict[str, str]]]]] = [
         None
     ] * len(products)
+    total = len(products)
+    logging.info("画像解決対象件数: %d", total)
+    done = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_index = {
             executor.submit(resolve_product_images, product, url_cache, cache_lock): index
@@ -361,7 +364,24 @@ def export_products_sheet(
         for future in as_completed(future_to_index):
             index = future_to_index[future]
             product = products[index]
-            main_src, image_rows, missing_rows = future.result()
+            try:
+                main_src, image_rows, missing_rows = future.result()
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(
+                    "画像解決中に例外が発生しました: product_id=%s %s",
+                    product.product_id,
+                    exc,
+                )
+                main_src = ""
+                image_rows = []
+                missing_rows = [
+                    {
+                        "product_id": product.product_id,
+                        "image_head": product.image_head,
+                        "kind": "main",
+                        "tried_urls": "",
+                    }
+                ]
             product_row = {
                 "Handle": product.product_id,
                 "Title": product.name,
@@ -373,6 +393,10 @@ def export_products_sheet(
                 "Image Src": main_src,
             }
             results[index] = (product_row, image_rows, missing_rows)
+            done += 1
+            if done == 1 or done % 10 == 0 or done == total:
+                percentage = (done / total * 100) if total else 100
+                logging.info("画像解決 %d/%d 完了 (%.1f%%)", done, total, percentage)
 
     product_rows: List[Dict[str, str]] = []
     image_rows: List[Dict[str, str]] = []
@@ -385,6 +409,10 @@ def export_products_sheet(
         product_rows.append(product_row)
         image_rows.extend(product_image_rows)
         missing_rows.extend(product_missing_rows)
+
+    logging.info("Products シート行数: %d", len(product_rows))
+    logging.info("Images シート行数: %d", len(image_rows))
+    logging.info("Missing 画像行数: %d", len(missing_rows))
 
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=product_fieldnames)
